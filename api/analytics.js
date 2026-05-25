@@ -1,7 +1,8 @@
 /**
  * LinkedIn Analytics — Main Snapshot Capture
- * Captures: followers, visitors, demographics, post performance,
- * follower sources, reach funnel, link clicks, hashtag data
+ * Uses HarvestAPI actors (no cookie required):
+ *   - harvestapi/linkedin-company       → follower count, company details
+ *   - harvestapi/linkedin-company-posts → post performance data
  *
  * Runs daily at 8 AM PST via Vercel cron
  */
@@ -13,6 +14,8 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
 );
+
+const LINKEDIN_COMPANY_URL = 'https://www.linkedin.com/company/114124073/';
 
 // ============================================================
 // APIFY RUNNER
@@ -29,10 +32,10 @@ async function runApifyActor(actorId, input) {
   );
   const runId = startRes.data.data.id;
 
-  // Poll for completion (max 90 seconds)
+  // Poll for completion (max 120 seconds)
   let status = 'RUNNING';
   let attempts = 0;
-  while (status === 'RUNNING' && attempts < 90) {
+  while (status === 'RUNNING' && attempts < 120) {
     await new Promise((r) => setTimeout(r, 1000));
     const statusRes = await axios.get(
       `${base}/acts/${actorId}/runs/${runId}?token=${apiKey}`
@@ -58,25 +61,28 @@ async function runApifyActor(actorId, input) {
 
 async function captureSnapshot() {
   const companyId = process.env.COMPANY_ID;
-  const actorId = process.env.APIFY_ACTOR_ID;
-  const liAtCookie = process.env.LINKEDIN_COOKIE_LI_AT;
   const today = new Date().toISOString().split('T')[0];
 
-  // Run Apify authenticated scraper
-  const results = await runApifyActor(actorId, {
-    liAtCookie,
-    companyId,
-    scrapePostDetails: true,
-    maxPosts: 20,
+  // ── Run Company Details actor ─────────────────────────────
+  const companyResults = await runApifyActor('harvestapi/linkedin-company', {
+    urls: [LINKEDIN_COMPANY_URL],
   });
 
-  if (!results || results.length === 0) {
-    throw new Error('No results from Apify');
+  if (!companyResults || companyResults.length === 0) {
+    throw new Error('No results from Company Details actor');
   }
 
-  const data = results[0];
+  const company = companyResults[0];
 
-  // Get previous snapshot for deltas
+  // ── Run Company Posts actor ───────────────────────────────
+  const postsResults = await runApifyActor('harvestapi/linkedin-company-posts', {
+    urls: [LINKEDIN_COMPANY_URL],
+    maxPostsPerInput: 20,
+  });
+
+  const posts = postsResults || [];
+
+  // ── Get previous snapshot for deltas ─────────────────────
   const { data: prev } = await supabase
     .from('linkedin_snapshots')
     .select('*')
@@ -85,61 +91,57 @@ async function captureSnapshot() {
     .limit(1);
   const prevSnap = prev?.[0];
 
-  // ── Build main snapshot ──────────────────────────────────
+  // ── Build main snapshot ───────────────────────────────────
+  const followersCount = company.followersCount || company.followers || 0;
+
   const snapshot = {
     company_id: companyId,
     snapshot_date: today,
 
-    followers_count: data.followersCount || 0,
-    followers_delta: (data.followersCount || 0) - (prevSnap?.followers_count || 0),
+    // Follower metrics
+    followers_count: followersCount,
+    followers_delta: followersCount - (prevSnap?.followers_count || 0),
 
-    page_visitors: data.pageViews || null,
-    page_visitors_delta: data.pageViews
-      ? data.pageViews - (prevSnap?.page_visitors || 0)
+    // Page visitors (not available without auth — set null)
+    page_visitors: null,
+    page_visitors_delta: null,
+
+    // Profile link clicks (not available without auth — set null)
+    profile_link_clicks: null,
+    profile_link_clicks_delta: null,
+
+    // Follower sources (not available without auth — set null)
+    followers_from_organic: null,
+    followers_from_post_engagement: null,
+    followers_from_direct_visit: null,
+
+    // Reach funnel — aggregate from posts
+    total_impressions: posts.reduce((sum, p) => sum + (p.impressions || 0), 0) || null,
+    unique_reach: null,
+    avg_click_through_rate: null,
+    follower_conversion_rate: null,
+
+    // Organic engagement
+    organic_posts: posts.length || null,
+    non_organic_posts: null,
+    organic_engagement_rate: posts.length > 0
+      ? posts.reduce((sum, p) => sum + (p.socialActivityCountsengagementRate || p.engagementRate || 0), 0) / posts.length
       : null,
+    non_organic_engagement_rate: null,
 
-    // #3 Profile link clicks
-    profile_link_clicks: data.websiteClicks || null,
-    profile_link_clicks_delta: data.websiteClicks
-      ? data.websiteClicks - (prevSnap?.profile_link_clicks || 0)
-      : null,
-
-    // #4 Follower sources
-    followers_from_organic: data.followerSources?.organic || null,
-    followers_from_post_engagement: data.followerSources?.postEngagement || null,
-    followers_from_direct_visit: data.followerSources?.directVisit || null,
-
-    // #5 Reach funnel
-    total_impressions: data.totalImpressions || null,
-    unique_reach: data.uniqueReach || null,
-    avg_click_through_rate: data.avgCTR || null,
-    follower_conversion_rate: data.followerConversionRate || null,
-
-    // Organic vs non-organic
-    organic_posts: data.organicPostCount || null,
-    non_organic_posts: data.nonOrganicPostCount || null,
-    organic_engagement_rate: data.organicEngagementRate || null,
-    non_organic_engagement_rate: data.nonOrganicEngagementRate || null,
-
-    // Demographics
-    visitor_job_titles: data.audienceJobTitles
-      ? JSON.stringify(data.audienceJobTitles)
-      : null,
-    visitor_industries: data.audienceIndustries
-      ? JSON.stringify(data.audienceIndustries)
-      : null,
-    visitor_company_sizes: data.audienceCompanySizes
-      ? JSON.stringify(data.audienceCompanySizes)
-      : null,
+    // Demographics (not available without auth — set null)
+    visitor_job_titles: null,
+    visitor_industries: null,
+    visitor_company_sizes: null,
 
     // Top post summary
-    top_post_id: data.posts?.[0]?.id || null,
-    top_post_title: data.posts?.[0]?.title?.substring(0, 500) || null,
-    top_post_engagement: data.posts?.[0]?.engagementCount || null,
-    top_post_engagement_rate: data.posts?.[0]?.engagementRate || null,
-    top_post_impressions: data.posts?.[0]?.impressions || null,
+    top_post_id: posts[0]?.id || posts[0]?.postUrl || null,
+    top_post_title: posts[0]?.text?.substring(0, 500) || null,
+    top_post_engagement: posts[0]?.likes || null,
+    top_post_engagement_rate: posts[0]?.engagementRate || null,
+    top_post_impressions: posts[0]?.impressions || null,
 
-    raw_api_response: data,
+    raw_api_response: { company, postsCount: posts.length },
   };
 
   // Upsert snapshot
@@ -147,49 +149,56 @@ async function captureSnapshot() {
     .from('linkedin_snapshots')
     .upsert([snapshot], { onConflict: 'company_id,snapshot_date' });
 
-  // ── Save post-level data (#1 + #8) ───────────────────────
-  if (data.posts && data.posts.length > 0) {
-    const postRows = data.posts.map((post) => ({
-      company_id: companyId,
-      post_id: post.id || `${companyId}-${today}-${Math.random()}`,
-      snapshot_date: today,
-      post_title: post.title?.substring(0, 500),
-      post_snippet: post.text?.substring(0, 1000),
-      post_type: post.type || 'text',
-      post_published_at: post.publishedAt || null,
-      post_url: post.url || null,
-      impressions: post.impressions || null,
-      unique_reach: post.uniqueReach || null,
-      engagement_count: post.engagementCount || null,
-      engagement_rate: post.engagementRate || null,
-      likes: post.likes || null,
-      comments: post.comments || null,
-      shares: post.shares || null,
-      click_through_rate: post.ctr || null,
-      hashtags: post.hashtags || [],
-    }));
+  // ── Save post-level data ──────────────────────────────────
+  if (posts.length > 0) {
+    const postRows = posts.map((post) => {
+      // Extract hashtags from post text
+      const text = post.text || '';
+      const hashtags = (text.match(/#\w+/g) || []).map(h => h.replace('#', ''));
+
+      // Calculate engagement rate
+      const likes    = post.likes    || post.socialActivityCounts?.numLikes    || 0;
+      const comments = post.comments || post.socialActivityCounts?.numComments || 0;
+      const shares   = post.shares   || post.socialActivityCounts?.numShares   || 0;
+      const totalEng = likes + comments + shares;
+
+      return {
+        company_id: companyId,
+        post_id: post.id || post.postUrl || `${companyId}-${today}-${Math.random()}`,
+        snapshot_date: today,
+        post_title: text.substring(0, 500),
+        post_snippet: text.substring(0, 1000),
+        post_type: post.type || (post.images?.length > 0 ? 'image' : post.video ? 'video' : 'text'),
+        post_published_at: post.postedAt || post.publishedAt || null,
+        post_url: post.postUrl || post.url || null,
+        impressions: post.impressions || null,
+        unique_reach: post.reach || null,
+        engagement_count: totalEng || null,
+        engagement_rate: post.engagementRate || (totalEng > 0 && followersCount > 0 ? (totalEng / followersCount) * 100 : null),
+        likes:    likes    || null,
+        comments: comments || null,
+        shares:   shares   || null,
+        click_through_rate: post.clicks || null,
+        hashtags: hashtags,
+      };
+    });
 
     await supabase
       .from('linkedin_posts')
       .upsert(postRows, { onConflict: 'company_id,post_id,snapshot_date' });
 
-    // ── Aggregate hashtag performance (#8) ────────────────
+    // ── Aggregate hashtag performance ─────────────────────
     const hashtagMap = {};
-    for (const post of data.posts) {
+    for (const post of postRows) {
       if (!post.hashtags || post.hashtags.length === 0) continue;
       for (const tag of post.hashtags) {
         if (!hashtagMap[tag]) {
-          hashtagMap[tag] = {
-            times_used: 0,
-            total_impressions: 0,
-            total_engagement_rate: 0,
-            total_reach: 0,
-          };
+          hashtagMap[tag] = { times_used: 0, total_impressions: 0, total_engagement_rate: 0, total_reach: 0 };
         }
         hashtagMap[tag].times_used += 1;
-        hashtagMap[tag].total_impressions += post.impressions || 0;
-        hashtagMap[tag].total_engagement_rate += post.engagementRate || 0;
-        hashtagMap[tag].total_reach += post.uniqueReach || 0;
+        hashtagMap[tag].total_impressions    += post.impressions    || 0;
+        hashtagMap[tag].total_engagement_rate += post.engagement_rate || 0;
+        hashtagMap[tag].total_reach          += post.unique_reach   || 0;
       }
     }
 
@@ -197,9 +206,9 @@ async function captureSnapshot() {
       snapshot_date: today,
       hashtag: tag,
       times_used: stats.times_used,
-      avg_impressions: stats.total_impressions / stats.times_used,
+      avg_impressions:     stats.total_impressions     / stats.times_used,
       avg_engagement_rate: stats.total_engagement_rate / stats.times_used,
-      avg_reach: stats.total_reach / stats.times_used,
+      avg_reach:           stats.total_reach           / stats.times_used,
     }));
 
     if (hashtagRows.length > 0) {
@@ -211,8 +220,8 @@ async function captureSnapshot() {
 
   return {
     success: true,
-    snapshot,
-    postsCaptures: data.posts?.length || 0,
+    followersCount,
+    postsCaptures: posts.length,
   };
 }
 
@@ -302,18 +311,16 @@ export default async function handler(req, res) {
           .order('snapshot_date', { ascending: false })
           .limit(30);
 
-        const latest = data?.[0];
+        const latest   = data?.[0];
         const earliest = data?.[data.length - 1];
 
         return res.status(200).json({
           followerGrowth: (latest?.followers_count || 0) - (earliest?.followers_count || 0),
-          visitorGrowth: latest?.page_visitors
-            ? latest.page_visitors - (earliest?.page_visitors || 0)
-            : null,
+          visitorGrowth: null,
           avgDailyFollowerDelta:
             ((latest?.followers_count || 0) - (earliest?.followers_count || 0)) /
             (data?.length || 1),
-          totalLinkClicks: data?.reduce((sum, d) => sum + (d.profile_link_clicks || 0), 0),
+          totalLinkClicks: null,
           avgOrganicEngagementRate:
             data?.reduce((sum, d) => sum + (d.organic_engagement_rate || 0), 0) /
             (data?.length || 1),
