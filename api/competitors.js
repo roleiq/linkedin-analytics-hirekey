@@ -16,11 +16,11 @@ const supabase = createClient(
 
 // ── Customize your competitor list here ──────────────────────
 const COMPETITORS = [
-  { name: 'Jobscan', slug: 'jobscan' },
-  { name: 'Teal HQ', slug: 'teal-hq' },
-  { name: 'Huntr', slug: 'huntr' },
-  { name: 'Kickresume', slug: 'kickresume' },
-  { name: 'Careerflow', slug: 'careerflow-ai' },
+  { name: 'Jobscan',     slug: 'jobscan'        },
+  { name: 'Teal HQ',     slug: 'teal-hq'        },
+  { name: 'Huntr',       slug: 'huntr'           },
+  { name: 'Kickresume',  slug: 'kickresume'      },
+  { name: 'Careerflow',  slug: 'careerflow-ai'  },
 ];
 
 async function runApifyActor(actorId, input) {
@@ -96,7 +96,17 @@ async function captureCompetitorSnapshots() {
   return { success: true, captured: rows.length };
 }
 
+// ============================================================
+// API HANDLER (Vercel Serverless Function)
+// ============================================================
+
 export default async function handler(req, res) {
+  // ── CORS Headers ─────────────────────────────────────────
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
   if (req.method === 'POST') {
     try {
       const result = await captureCompetitorSnapshots();
