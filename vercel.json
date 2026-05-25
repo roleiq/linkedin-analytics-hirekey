@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/analytics",
+      "schedule": "0 16 * * *"
+    },
+    {
+      "path": "/api/competitors",
+      "schedule": "0 16 * * *"
+    }
+  ]
+}
