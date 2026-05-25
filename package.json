@@ -1,0 +1,13 @@
+{
+  "name": "linkedin-analytics-hirekey",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node api/analytics.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.38.0",
+    "node-fetch": "^3.3.2",
+    "axios": "^1.6.0"
+  }
+}
