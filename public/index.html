@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>HireKey — LinkedIn Analytics</title>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+    :root{
+      --velvet:#353148;--purple:#8C60F3;--purple-light:#a78bfa;
+      --green:#10b981;--red:#ef4444;--amber:#f59e0b;--blue:#3b82f6;
+      --gray-50:#f9fafb;--gray-100:#f3f4f6;--gray-200:#e5e7eb;
+      --gray-400:#9ca3af;--gray-600:#6b7280;--gray-700:#374151;--white:#fff;
+    }
+    body{font-family:'Inter',system-ui,sans-serif;background:var(--gray-50);color:var(--gray-700);min-height:100vh}
+    ::-webkit-scrollbar{width:5px;height:5px}
+    ::-webkit-scrollbar-thumb{background:var(--purple-light);border-radius:3px}
+
+
+
+    /* NAV */
+    nav{background:var(--velvet);padding:0 28px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;z-index:99;border-bottom:1px solid rgba(255,255,255,.06)}
+    .nav-logo{font-family:'Sora',sans-serif;font-size:17px;font-weight:800;color:#fff;letter-spacing:-.3px}
+    .nav-logo span{color:var(--purple-light)}
+    .nav-right{display:flex;align-items:center;gap:10px}
+    .nav-badge{font-size:11px;background:rgba(140,96,243,.2);color:var(--purple-light);padding:3px 10px;border-radius:20px;font-weight:600;border:1px solid rgba(140,96,243,.3)}
+    .nav-sub{font-size:11px;color:rgba(255,255,255,.3)}
+    .logout{font-size:12px;color:rgba(255,255,255,.4);background:none;border:1px solid rgba(255,255,255,.12);padding:5px 12px;border-radius:6px;cursor:pointer;font-family:'Inter',sans-serif;transition:all .2s}
+    .logout:hover{color:#fff;border-color:rgba(255,255,255,.3)}
+
+    /* LAYOUT */
+    
+    .main{max-width:1240px;margin:0 auto;padding:28px 22px 60px}
+
+    /* CONTROLS */
+    .controls{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
+    .page-title{font-family:'Sora',sans-serif;font-size:21px;font-weight:700;color:var(--velvet);letter-spacing:-.3px}
+    .ctrl-right{display:flex;gap:8px;align-items:center}
+    .period-group{display:flex;gap:3px;background:var(--gray-100);border-radius:8px;padding:3px}
+    .period-btn{padding:5px 13px;border:none;border-radius:6px;background:transparent;color:var(--gray-600);cursor:pointer;font-size:12px;font-weight:600;font-family:'Inter',sans-serif;transition:all .15s}
+    .period-btn.active{background:#fff;color:var(--velvet);box-shadow:0 1px 3px rgba(0,0,0,.1)}
+    .refresh-btn{padding:6px 14px;border:none;border-radius:8px;background:var(--purple);color:#fff;cursor:pointer;font-size:12px;font-weight:600;font-family:'Inter',sans-serif;transition:opacity .2s}
+    .refresh-btn:hover{opacity:.85}
+
+    /* STAT CARDS */
+    .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:11px;margin-bottom:24px}
+    .stat-card{background:#fff;border-radius:12px;padding:17px 18px;border:1px solid var(--gray-100);box-shadow:0 1px 3px rgba(0,0,0,.04);transition:box-shadow .2s}
+    .stat-card:hover{box-shadow:0 4px 12px rgba(0,0,0,.07)}
+    .stat-lbl{font-size:10px;font-weight:700;color:var(--gray-400);text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px}
+    .stat-val{font-family:'Sora',sans-serif;font-size:24px;font-weight:700;color:var(--velvet);letter-spacing:-.5px;line-height:1;margin-bottom:4px}
+    .stat-delta{font-size:12px;font-weight:600}
+    .stat-sub{font-size:11px;color:var(--gray-400);margin-top:3px}
+
+    /* TABS */
+    .tab-bar{display:flex;gap:3px;background:var(--gray-100);border-radius:10px;padding:4px;margin-bottom:18px;flex-wrap:wrap}
+    .tab-btn{padding:7px 18px;border:none;border-radius:7px;background:transparent;color:var(--gray-600);cursor:pointer;font-size:13px;font-weight:500;font-family:'Inter',sans-serif;transition:all .15s;white-space:nowrap}
+    .tab-btn.active{background:#fff;color:var(--velvet);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+    .tab-panel{display:none;flex-direction:column;gap:15px}
+    .tab-panel.active{display:flex}
+
+    /* CARD */
+    .card{background:#fff;border-radius:14px;padding:20px 24px;border:1px solid var(--gray-100);box-shadow:0 1px 3px rgba(0,0,0,.04)}
+    .card-title{font-family:'Sora',sans-serif;font-size:13px;font-weight:700;color:var(--velvet);margin:0 0 16px;padding-bottom:11px;border-bottom:1px solid var(--gray-100)}
+    .grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:15px}
+    .grid-3{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:15px}
+
+    /* BAR CHART (CSS) */
+    .bar-chart{display:flex;align-items:flex-end;gap:6px;height:180px;padding:0 4px}
+    .bar-wrap{display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;height:100%;justify-content:flex-end}
+    .bar-col{width:100%;border-radius:4px 4px 0 0;background:var(--purple);min-height:2px;transition:height .5s ease}
+    .bar-col.green{background:var(--green)}
+    .bar-lbl{font-size:10px;color:var(--gray-400);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:48px}
+    .bar-val{font-size:10px;font-weight:600;color:var(--gray-600)}
+
+    /* LINE CHART (SVG) */
+    .line-chart-wrap{width:100%;overflow:hidden}
+    .line-chart-wrap svg{display:block;width:100%}
+
+    /* AREA CHART */
+    .chart-container{width:100%;height:220px;position:relative}
+
+    /* FUNNEL */
+    .funnel-rows{display:flex;flex-direction:column;gap:9px}
+    .funnel-row{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-radius:8px;background:var(--gray-50);border-left:3px solid var(--purple)}
+    .funnel-lbl{font-size:13px;color:var(--gray-600);font-weight:500}
+    .funnel-val{font-family:'Sora',sans-serif;font-size:17px;font-weight:700}
+
+    /* PIE (CSS) */
+    .pie-wrap{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+    .pie-legend{display:flex;flex-direction:column;gap:8px}
+    .pie-item{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray-700)}
+    .pie-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+
+    /* DEMO BARS */
+    .demo-rows{display:flex;flex-direction:column;gap:9px}
+    .demo-row{display:flex;align-items:center;gap:8px}
+    .demo-lbl{font-size:12px;color:var(--gray-600);width:120px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .demo-track{flex:1;background:var(--gray-100);border-radius:4px;height:7px;overflow:hidden}
+    .demo-fill{height:7px;border-radius:4px;background:linear-gradient(90deg,var(--purple),var(--purple-light))}
+    .demo-pct{font-size:11px;font-weight:600;color:var(--velvet);width:30px;text-align:right}
+
+    /* TABLE */
+    .tbl-wrap{overflow-x:auto}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    thead tr{border-bottom:2px solid var(--gray-100)}
+    th{padding:9px 12px;text-align:left;font-weight:700;color:var(--gray-400);font-size:10px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+    td{padding:11px 12px;color:var(--gray-700);vertical-align:middle}
+    tr.alt{background:#fafafa}
+    .badge{background:var(--gray-100);color:var(--gray-600);padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase}
+    .sent-badge{padding:2px 8px;border-radius:5px;font-size:11px;font-weight:600}
+    .tbl-note{font-size:11px;color:var(--gray-400);margin-top:10px;font-style:italic}
+    .empty{color:var(--gray-400);font-size:13px;font-style:italic;padding:20px 0;text-align:center}
+
+    /* LOADING */
+    #loading{display:none;flex-direction:column;align-items:center;justify-content:center;height:60vh;gap:14px}
+    .spinner{width:34px;height:34px;border:3px solid var(--gray-200);border-top-color:var(--purple);border-radius:50%;animation:spin .8s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .loading-txt{font-size:13px;color:var(--gray-400)}
+
+    @media(max-width:600px){
+      .main{padding:16px 14px 40px}
+      nav{padding:0 14px}
+      .nav-sub{display:none}
+    }
+  </style>
+</head>
+<body>
+
+<!-- MAIN APP -->
+<div id="app" style="display:block">
+  <nav>
+    <div class="nav-logo">Hire<span>Key</span></div>
+    <div class="nav-right">
+      <span class="nav-badge">LinkedIn Analytics</span>
+      <span class="nav-sub">Updated daily · 8 AM PST</span>
+      <button class="logout" onclick="logout()">Sign out</button>
+    </div>
+  </nav>
+
+  <div class="main">
+    <!-- Controls -->
+    <div class="controls">
+      <div class="page-title">LinkedIn Analytics</div>
+      <div class="ctrl-right">
+        <div class="period-group">
+          <button class="period-btn" onclick="setPeriod(7,this)">7d</button>
+          <button class="period-btn active" onclick="setPeriod(30,this)">30d</button>
+          <button class="period-btn" onclick="setPeriod(90,this)">90d</button>
+        </div>
+        <button class="refresh-btn" onclick="loadData()">↻ Refresh</button>
+      </div>
+    </div>
+
+    <!-- Loading -->
+    <div id="loading"><div class="spinner"></div><div class="loading-txt">Loading analytics...</div></div>
+
+    <!-- Stat Cards -->
+    <div class="stats-grid" id="stats-grid">
+      <div class="stat-card"><div class="stat-lbl">Total Followers</div><div class="stat-val" id="s-followers">—</div><div class="stat-delta" id="s-followers-d"></div><div class="stat-sub" id="s-followers-sub"></div></div>
+      <div class="stat-card"><div class="stat-lbl">Page Visitors</div><div class="stat-val" id="s-visitors">—</div><div class="stat-delta" id="s-visitors-d"></div></div>
+      <div class="stat-card"><div class="stat-lbl">Profile Link Clicks</div><div class="stat-val" id="s-clicks">—</div><div class="stat-delta" id="s-clicks-d"></div><div class="stat-sub">LinkedIn → hirekey.io</div></div>
+      <div class="stat-card"><div class="stat-lbl">Organic Engagement</div><div class="stat-val" id="s-eng">—</div></div>
+      <div class="stat-card"><div class="stat-lbl">Total Impressions</div><div class="stat-val" id="s-imp">—</div></div>
+      <div class="stat-card"><div class="stat-lbl">Unique Reach</div><div class="stat-val" id="s-reach">—</div></div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="showTab('overview',this)">Overview</button>
+      <button class="tab-btn" onclick="showTab('posts',this)">Post Performance</button>
+      <button class="tab-btn" onclick="showTab('demographics',this)">Demographics</button>
+      <button class="tab-btn" onclick="showTab('competitors',this)">Competitors</button>
+      <button class="tab-btn" onclick="showTab('hashtags',this)">Hashtags</button>
+    </div>
+
+    <!-- OVERVIEW TAB -->
+    <div id="tab-overview" class="tab-panel active">
+      <div class="card">
+        <div class="card-title">Follower Growth</div>
+        <div id="follower-chart" style="width:100%;height:200px;overflow:hidden"></div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Follower Sources</div>
+          <div id="source-chart" class="pie-wrap"><div class="empty">No source data yet</div></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Reach to Conversion Funnel</div>
+          <div class="funnel-rows">
+            <div class="funnel-row" style="border-left-color:#8C60F3"><span class="funnel-lbl">Total Impressions</span><span class="funnel-val" id="f-imp" style="color:#8C60F3">—</span></div>
+            <div class="funnel-row" style="border-left-color:#6366f1"><span class="funnel-lbl">Unique Reach</span><span class="funnel-val" id="f-reach" style="color:#6366f1">—</span></div>
+            <div class="funnel-row" style="border-left-color:#3b82f6"><span class="funnel-lbl">Link Clicks</span><span class="funnel-val" id="f-clicks" style="color:#3b82f6">—</span></div>
+            <div class="funnel-row" style="border-left-color:#10b981"><span class="funnel-lbl">New Followers</span><span class="funnel-val" id="f-new" style="color:#10b981">—</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Organic Engagement Rate</div>
+        <div id="eng-chart" style="width:100%;height:160px"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Profile Link Clicks (LinkedIn → hirekey.io)</div>
+        <div id="clicks-chart" style="width:100%;height:160px"></div>
+      </div>
+    </div>
+
+    <!-- POSTS TAB -->
+    <div id="tab-posts" class="tab-panel">
+      <div class="card">
+        <div class="card-title">Avg Engagement Rate by Post Type</div>
+        <div id="posttype-chart" style="width:100%;height:180px"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Post Leaderboard — ranked by engagement rate</div>
+        <div class="tbl-wrap"><table id="posts-table">
+          <thead><tr><th>Date</th><th>Post</th><th>Type</th><th>Impressions</th><th>Engagement %</th><th>Likes</th><th>Comments</th><th>Shares</th><th>Sentiment</th></tr></thead>
+          <tbody id="posts-tbody"><tr><td colspan="9" class="empty">No post data yet</td></tr></tbody>
+        </table></div>
+        <p class="tbl-note">Comment sentiment updated weekly in Supabase table editor.</p>
+      </div>
+    </div>
+
+    <!-- DEMOGRAPHICS TAB -->
+    <div id="tab-demographics" class="tab-panel">
+      <div class="grid-3">
+        <div class="card"><div class="card-title">Visitor Job Titles</div><div class="demo-rows" id="demo-titles"><div class="empty">No data yet</div></div></div>
+        <div class="card"><div class="card-title">Visitor Industries</div><div class="demo-rows" id="demo-industries"><div class="empty">No data yet</div></div></div>
+        <div class="card"><div class="card-title">Company Sizes</div><div class="demo-rows" id="demo-sizes"><div class="empty">No data yet</div></div></div>
+      </div>
+    </div>
+
+    <!-- COMPETITORS TAB -->
+    <div id="tab-competitors" class="tab-panel">
+      <div class="card">
+        <div class="card-title">Follower Trends: HireKey vs. Competitors</div>
+        <div id="comp-chart" style="width:100%;height:240px;overflow:hidden"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Latest Snapshot</div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Company</th><th>Followers</th><th>Daily Change</th></tr></thead>
+          <tbody id="comp-tbody"><tr><td colspan="3" class="empty">No competitor data yet</td></tr></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <!-- HASHTAGS TAB -->
+    <div id="tab-hashtags" class="tab-panel">
+      <div class="card">
+        <div class="card-title">Hashtag Performance — avg engagement rate</div>
+        <div id="hashtag-chart" style="width:100%;height:260px;overflow:hidden"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Hashtag Details</div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Hashtag</th><th>Times Used</th><th>Avg Impressions</th><th>Avg Reach</th><th>Avg Engagement %</th></tr></thead>
+          <tbody id="hashtag-tbody"><tr><td colspan="5" class="empty">No hashtag data yet</td></tr></tbody>
+        </table></div>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<script>
+const API_BASE = 'https://linkedin-analytics-hirekey.vercel.app';
+
+const COLORS   = ['#8C60F3','#10b981','#f59e0b','#3b82f6','#ec4899','#6366f1'];
+const SENTIMENT = {
+  positive:{bg:'rgba(16,185,129,.1)',color:'#065f46',label:'Positive'},
+  neutral: {bg:'rgba(107,114,128,.1)',color:'#374151',label:'Neutral'},
+  negative:{bg:'rgba(239,68,68,.1)',  color:'#991b1b',label:'Negative'},
+  mixed:   {bg:'rgba(245,158,11,.1)', color:'#92400e',label:'Mixed'},
+};
+
+let period = 30;
+let state  = { snapshots:[], summary:null, latest:null, posts:[], hashtags:[], competitors:[] };
+
+function logout() { /* no-op */ }
+
+// Load on startup
+window.addEventListener('load', loadData);
+
+// ── Period / Tab ──────────────────────────────────────────────
+function setPeriod(d, btn) {
+  period = d;
+  document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadData();
+}
+
+function showTab(id, btn) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-'+id).classList.add('active');
+  btn.classList.add('active');
+}
+
+// ── Fetch ─────────────────────────────────────────────────────
+async function loadData() {
+  document.getElementById('loading').style.display     = 'flex';
+  document.getElementById('stats-grid').style.opacity  = '.4';
+  try {
+    const [snapsRes, sumRes, latRes, postsRes, hashRes, compRes] = await Promise.all([
+      fetch(`${API_BASE}/api/analytics?action=snapshots&days=${period}`),
+      fetch(`${API_BASE}/api/analytics?action=summary`),
+      fetch(`${API_BASE}/api/analytics?action=latest`),
+      fetch(`${API_BASE}/api/analytics?action=posts&days=${period}`),
+      fetch(`${API_BASE}/api/analytics?action=hashtags&days=${period}`),
+      fetch(`${API_BASE}/api/analytics?action=competitors&days=${period}`),
+    ]);
+    state.snapshots   = await snapsRes.json() || [];
+    state.summary     = await sumRes.json()   || {};
+    state.latest      = await latRes.json()   || {};
+    state.posts       = await postsRes.json() || [];
+    state.hashtags    = await hashRes.json()  || [];
+    state.competitors = await compRes.json()  || [];
+  } catch(e) { console.error(e); }
+  document.getElementById('loading').style.display    = 'none';
+  document.getElementById('stats-grid').style.opacity = '1';
+  render();
+}
+
+// ── Helpers ───────────────────────────────────────────────────
+function fmt(n)    { return n!=null ? Number(n).toLocaleString() : '—'; }
+function fmtPct(n) { return n!=null ? Number(n).toFixed(2)+'%'  : '—'; }
+function shortDate(d) { return new Date(d).toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
+
+function setDelta(elId, delta) {
+  const el = document.getElementById(elId);
+  if(!el || delta==null) return;
+  const pos = delta >= 0;
+  el.style.color = pos ? '#10b981' : '#ef4444';
+  el.textContent = (pos?'↑ ':'↓ ') + Math.abs(delta).toLocaleString();
+}
+
+// ── SVG Line / Area Chart ─────────────────────────────────────
+function makeSVGLine(container, data, keys, colors, height=200, filled=false) {
+  if(!data||data.length===0){container.innerHTML='<div class="empty">No data yet — first snapshot tomorrow at 8 AM PST</div>';return;}
+  const W=container.clientWidth||700, H=height, PL=38, PR=12, PT=12, PB=32;
+  const cW=W-PL-PR, cH=H-PT-PB;
+  const vals = keys.flatMap(k=>data.map(d=>d[k]||0));
+  const minV = Math.min(...vals), maxV = Math.max(...vals)||1;
+  const range = maxV-minV||1;
+  const xStep = cW/(data.length-1||1);
+
+  function px(i,v){ return { x: PL+i*xStep, y: PT+cH-((v-minV)/range)*cH }; }
+
+  // Y labels
+  let yLabels='';
+  [0,.25,.5,.75,1].forEach(t=>{
+    const v=minV+range*t;
+    const y=PT+cH-cH*t;
+    yLabels+=`<text x="${PL-4}" y="${y+4}" font-size="10" fill="#9ca3af" text-anchor="end">${v>999?Math.round(v/1000)+'k':Math.round(v)}</text>
+    <line x1="${PL}" y1="${y}" x2="${PL+cW}" y2="${y}" stroke="#f3f4f6" stroke-width="1"/>`;
+  });
+
+  // X labels (max 8)
+  let xLabels='';
+  const step = Math.max(1,Math.floor(data.length/8));
+  data.forEach((d,i)=>{
+    if(i%step===0||i===data.length-1)
+      xLabels+=`<text x="${PL+i*xStep}" y="${H-6}" font-size="10" fill="#9ca3af" text-anchor="middle">${d.label}</text>`;
+  });
+
+  let paths='';
+  keys.forEach((k,ki)=>{
+    const pts=data.map((d,i)=>px(i,d[k]||0));
+    const d=pts.map((p,i)=>(i===0?`M${p.x},${p.y}`:`L${p.x},${p.y}`)).join(' ');
+    paths+=`<path d="${d}" fill="none" stroke="${colors[ki]}" stroke-width="2.5" stroke-linejoin="round"/>`;
+    if(filled&&ki===0){
+      const area=d+` L${PL+cW},${PT+cH} L${PL},${PT+cH} Z`;
+      paths=`<defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stop-color="${colors[0]}" stop-opacity=".18"/><stop offset="95%" stop-color="${colors[0]}" stop-opacity="0"/></linearGradient></defs>
+      <path d="${area}" fill="url(#ag)"/>` + paths;
+    }
+    pts.forEach(p=>{ paths+=`<circle cx="${p.x}" cy="${p.y}" r="3" fill="${colors[ki]}" opacity=".7"/>`; });
+  });
+
+  container.innerHTML=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${yLabels}${xLabels}${paths}</svg>`;
+}
+
+// ── Bar Chart ─────────────────────────────────────────────────
+function makeBarChart(container, data, labelKey, valueKey, color='#8C60F3', height=160) {
+  if(!data||data.length===0){container.innerHTML='<div class="empty">No data yet</div>';return;}
+  const maxV = Math.max(...data.map(d=>d[valueKey]||0))||1;
+  let html='<div class="bar-chart">';
+  data.forEach(d=>{
+    const pct = ((d[valueKey]||0)/maxV)*100;
+    html+=`<div class="bar-wrap">
+      <div class="bar-val">${Number(d[valueKey]||0).toFixed(1)}</div>
+      <div class="bar-col" style="height:${Math.max(2,pct*(height-40)/100)}px;background:${color}"></div>
+      <div class="bar-lbl">${d[labelKey]}</div>
+    </div>`;
+  });
+  html+='</div>';
+  container.innerHTML=html;
+}
+
+// ── Horizontal Bar Chart (hashtags) ──────────────────────────
+function makeHorizBar(container, data, labelKey, valueKey, color='#8C60F3') {
+  if(!data||data.length===0){container.innerHTML='<div class="empty">No hashtag data yet</div>';return;}
+  const maxV = Math.max(...data.map(d=>d[valueKey]||0))||1;
+  let html='<div style="display:flex;flex-direction:column;gap:8px;padding:4px 0">';
+  data.slice(0,12).forEach(d=>{
+    const pct=((d[valueKey]||0)/maxV)*100;
+    html+=`<div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:12px;color:#6b7280;width:140px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">#${d[labelKey]}</span>
+      <div style="flex:1;background:#f3f4f6;border-radius:4px;height:10px;overflow:hidden">
+        <div style="width:${pct}%;height:10px;border-radius:4px;background:${color}"></div>
+      </div>
+      <span style="font-size:11px;font-weight:600;color:#374151;width:36px;text-align:right">${Number(d[valueKey]||0).toFixed(2)}%</span>
+    </div>`;
+  });
+  html+='</div>';
+  container.innerHTML=html;
+}
+
+// ── Pie (CSS conic-gradient) ──────────────────────────────────
+function makePie(container, data) {
+  if(!data||data.length===0){container.innerHTML='<div class="empty">No source data yet</div>';return;}
+  const total=data.reduce((s,d)=>s+(d.value||0),0)||1;
+  let conic='',start=0,legendHtml='';
+  data.forEach((d,i)=>{
+    const pct=(d.value/total)*100;
+    conic+=`${COLORS[i]} ${start}% ${start+pct}%,`;
+    start+=pct;
+    legendHtml+=`<div class="pie-item"><div class="pie-dot" style="background:${COLORS[i]}"></div>${d.name} <strong>${pct.toFixed(0)}%</strong></div>`;
+  });
+  container.innerHTML=`
+    <div style="width:110px;height:110px;border-radius:50%;background:conic-gradient(${conic.slice(0,-1)});flex-shrink:0"></div>
+    <div class="pie-legend">${legendHtml}</div>`;
+}
+
+// ── Demo bars ─────────────────────────────────────────────────
+function makeDemoBars(container, obj) {
+  if(!obj||Object.keys(obj).length===0){container.innerHTML='<div class="empty">No data yet</div>';return;}
+  const entries=Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  const max=entries[0]?.[1]||1;
+  container.innerHTML=entries.map(([label,val])=>`
+    <div class="demo-row">
+      <span class="demo-lbl">${label}</span>
+      <div class="demo-track"><div class="demo-fill" style="width:${Math.round((val/max)*100)}%"></div></div>
+      <span class="demo-pct">${val}%</span>
+    </div>`).join('');
+}
+
+// ── Main Render ───────────────────────────────────────────────
+function render() {
+  const { snapshots, summary, latest, posts, hashtags, competitors } = state;
+
+  // Stat cards
+  document.getElementById('s-followers').textContent = fmt(latest?.followers_count);
+  setDelta('s-followers-d', summary?.followerGrowth);
+  const avgD = summary?.avgDailyFollowerDelta;
+  document.getElementById('s-followers-sub').textContent = avgD!=null ? `+${Number(avgD).toFixed(1)}/day avg` : '';
+  document.getElementById('s-visitors').textContent = fmt(latest?.page_visitors);
+  setDelta('s-visitors-d', summary?.visitorGrowth);
+  document.getElementById('s-clicks').textContent = fmt(latest?.profile_link_clicks);
+  setDelta('s-clicks-d', latest?.profile_link_clicks_delta);
+  document.getElementById('s-eng').textContent    = fmtPct(latest?.organic_engagement_rate);
+  document.getElementById('s-imp').textContent    = fmt(latest?.total_impressions);
+  document.getElementById('s-reach').textContent  = fmt(latest?.unique_reach);
+
+  // Funnel
+  document.getElementById('f-imp').textContent    = fmt(latest?.total_impressions);
+  document.getElementById('f-reach').textContent  = fmt(latest?.unique_reach);
+  document.getElementById('f-clicks').textContent = fmt(latest?.profile_link_clicks);
+  document.getElementById('f-new').textContent    = fmt(latest?.followers_delta);
+
+  // Overview charts
+  const trendData = snapshots.map(s=>({ label:shortDate(s.snapshot_date), followers:s.followers_count, linkClicks:s.profile_link_clicks, organicEng:s.organic_engagement_rate }));
+  makeSVGLine(document.getElementById('follower-chart'), trendData, ['followers'], [COLORS[0]], 200, true);
+  makeBarChart(document.getElementById('eng-chart'),    trendData, 'label', 'organicEng',   '#10b981', 160);
+  makeBarChart(document.getElementById('clicks-chart'), trendData, 'label', 'linkClicks',   '#8C60F3', 160);
+
+  // Follower sources pie
+  const srcData=[
+    {name:'Post Engagement',   value:latest?.followers_from_post_engagement||0},
+    {name:'Organic Discovery', value:latest?.followers_from_organic||0},
+    {name:'Direct Visit',      value:latest?.followers_from_direct_visit||0},
+  ].filter(d=>d.value>0);
+  makePie(document.getElementById('source-chart'), srcData);
+
+  // Post type chart
+  const types={};
+  posts.forEach(p=>{ const t=p.post_type||'text'; if(!types[t]) types[t]={type:t,count:0,total:0}; types[t].count++; types[t].total+=p.engagement_rate||0; });
+  const typeData=Object.values(types).map(t=>({type:t.type,avgEngagement:parseFloat((t.total/t.count).toFixed(2))}));
+  makeBarChart(document.getElementById('posttype-chart'), typeData, 'type', 'avgEngagement', '#8C60F3', 180);
+
+  // Posts table
+  const ptbody = document.getElementById('posts-tbody');
+  if(!posts||posts.length===0) { ptbody.innerHTML='<tr><td colspan="9" class="empty">No post data yet — available after first snapshot</td></tr>'; }
+  else {
+    ptbody.innerHTML = posts.map((p,i)=>{
+      const s=p.comment_sentiment?SENTIMENT[p.comment_sentiment]:null;
+      const sentHtml=s?`<span class="sent-badge" style="background:${s.bg};color:${s.color}">${s.label}</span>`:'<span style="color:#d1d5db;font-size:12px">—</span>';
+      return `<tr class="${i%2===0?'alt':''}">
+        <td>${new Date(p.snapshot_date).toLocaleDateString()}</td>
+        <td style="max-width:200px">${(p.post_title||p.post_snippet||'—').substring(0,55)}</td>
+        <td><span class="badge">${p.post_type||'—'}</span></td>
+        <td>${fmt(p.impressions)}</td>
+        <td style="color:#8C60F3;font-weight:700">${p.engagement_rate!=null?Number(p.engagement_rate).toFixed(2)+'%':'—'}</td>
+        <td>${fmt(p.likes)}</td>
+        <td>${fmt(p.comments)}</td>
+        <td>${fmt(p.shares)}</td>
+        <td>${sentHtml}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Demographics
+  const parse = v => { try { return typeof v==='string'?JSON.parse(v):v; } catch(e){return {};} };
+  makeDemoBars(document.getElementById('demo-titles'),     parse(latest?.visitor_job_titles));
+  makeDemoBars(document.getElementById('demo-industries'), parse(latest?.visitor_industries));
+  makeDemoBars(document.getElementById('demo-sizes'),      parse(latest?.visitor_company_sizes));
+
+  // Competitors line chart
+  const compNames = [...new Set((competitors||[]).map(c=>c.competitor_name))];
+  const byDate={};
+  (competitors||[]).forEach(c=>{ if(!byDate[c.snapshot_date]) byDate[c.snapshot_date]={label:shortDate(c.snapshot_date)}; byDate[c.snapshot_date][c.competitor_name]=c.followers_count; });
+  snapshots.forEach(s=>{ if(byDate[s.snapshot_date]) byDate[s.snapshot_date]['HireKey']=s.followers_count; });
+  const compData=Object.values(byDate);
+  makeSVGLine(document.getElementById('comp-chart'), compData, ['HireKey',...compNames], COLORS, 240);
+
+  // Competitors table
+  const ctbody=document.getElementById('comp-tbody');
+  if(!latest||!latest.followers_count) { ctbody.innerHTML='<tr><td colspan="3" class="empty">No data yet</td></tr>'; }
+  else {
+    let rows=`<tr style="background:rgba(140,96,243,.06)">
+      <td style="font-weight:700;color:#353148">HireKey</td>
+      <td>${fmt(latest.followers_count)}</td>
+      <td style="color:${latest.followers_delta>=0?'#10b981':'#ef4444'};font-weight:600">${latest.followers_delta>=0?'+':''}${fmt(latest.followers_delta)}</td>
+    </tr>`;
+    compNames.forEach((name,i)=>{
+      const row=(competitors||[]).filter(c=>c.competitor_name===name).sort((a,b)=>b.snapshot_date>a.snapshot_date?1:-1)[0];
+      rows+=`<tr class="${i%2===0?'alt':''}">
+        <td>${name}</td><td>${fmt(row?.followers_count)}</td>
+        <td style="color:${(row?.followers_delta||0)>=0?'#10b981':'#ef4444'};font-weight:600">${(row?.followers_delta||0)>=0?'+':''}${fmt(row?.followers_delta)}</td>
+      </tr>`;
+    });
+    ctbody.innerHTML=rows;
+  }
+
+  // Hashtag chart + table
+  makeHorizBar(document.getElementById('hashtag-chart'), hashtags, 'hashtag', 'avg_engagement_rate');
+  const htbody=document.getElementById('hashtag-tbody');
+  if(!hashtags||hashtags.length===0) { htbody.innerHTML='<tr><td colspan="5" class="empty">No hashtag data yet</td></tr>'; }
+  else {
+    htbody.innerHTML=hashtags.map((t,i)=>`<tr class="${i%2===0?'alt':''}">
+      <td style="font-weight:600;color:#8C60F3">#${t.hashtag}</td>
+      <td>${t.times_used}</td>
+      <td>${t.avg_impressions!=null?Number(t.avg_impressions).toFixed(0):'—'}</td>
+      <td>${t.avg_reach!=null?Number(t.avg_reach).toFixed(0):'—'}</td>
+      <td style="color:#10b981;font-weight:700">${t.avg_engagement_rate!=null?Number(t.avg_engagement_rate).toFixed(2)+'%':'—'}</td>
+    </tr>`).join('');
+  }
+}
+</script>
+</body>
+</html>
