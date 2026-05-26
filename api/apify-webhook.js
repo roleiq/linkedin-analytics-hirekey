@@ -2,9 +2,16 @@
  * LinkedIn Analytics — Apify Webhook Receiver
  *
  * Receives "run succeeded" webhooks from Apify, fetches the scraped data
- * from Apify's dataset API, and writes to Supabase. Handles both the
- * authenticated company scraper and the public competitor scraper by
- * branching on the actor ID inside the webhook payload.
+ * from Apify's dataset API, and writes to Supabase.
+ *
+ * Setup uses 2 Apify store actors (both from harvestapi, both no-auth):
+ *   1. harvestapi/linkedin-company       → company profile data (followers)
+ *   2. harvestapi/linkedin-company-posts → post performance data
+ *
+ * The company actor is reused for BOTH HireKey snapshots AND competitor
+ * tracking. We tell them apart by inspecting the input URL of the run:
+ * if it scraped HireKey's company URL → save to linkedin_snapshots
+ * otherwise → save to linkedin_competitors.
  *
  * Why webhooks (not the old sync run-and-wait): Apify scrapes take 30-120s,
  * Vercel functions die at 10s. With webhooks, Apify schedules itself and
@@ -23,9 +30,10 @@ const supabase = createClient(
 
 const APIFY_API_KEY = process.env.APIFY_API_KEY;
 const WEBHOOK_SECRET = process.env.APIFY_WEBHOOK_SECRET;
-const COMPANY_ACTOR_ID = process.env.APIFY_ACTOR_ID;
-const COMPETITOR_ACTOR_ID = process.env.APIFY_COMPETITOR_ACTOR_ID;
-const COMPANY_ID = process.env.COMPANY_ID; // HireKey's LinkedIn company ID
+const COMPANY_ACTOR_ID = process.env.APIFY_ACTOR_ID;             // harvestapi/linkedin-company
+const POSTS_ACTOR_ID = process.env.APIFY_POSTS_ACTOR_ID;         // harvestapi/linkedin-company-posts
+const COMPANY_ID = process.env.COMPANY_ID;                       // HireKey's LinkedIn company ID
+const HIREKEY_URL_FRAGMENT = process.env.HIREKEY_URL_FRAGMENT;   // e.g. "hirekey" or "114124073"
 
 // ---------- Handler ----------
 
@@ -34,7 +42,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Auth: shared secret in custom header (configured in Apify webhook setup)
+  // Auth: shared secret in custom header (set in Apify webhook config)
   const providedSecret = req.headers['x-webhook-secret'];
   if (!WEBHOOK_SECRET || providedSecret !== WEBHOOK_SECRET) {
     console.warn('[webhook] auth failed', {
@@ -44,7 +52,7 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  // Parse payload (Vercel auto-parses JSON; this is defensive)
+  // Parse payload
   let payload;
   try {
     payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
@@ -53,7 +61,6 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid JSON' });
   }
 
-  // Validate Apify's default payload shape
   if (!payload?.resource?.defaultDatasetId) {
     console.error('[webhook] missing defaultDatasetId — did you set a payloadTemplate in Apify? Leave it blank.', payload);
     return res.status(400).json({ error: 'Missing defaultDatasetId' });
@@ -70,11 +77,21 @@ export default async function handler(req, res) {
   const actorId = payload.resource.actId;
   const datasetId = payload.resource.defaultDatasetId;
   const runId = payload.resource.id;
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const today = new Date().toISOString().slice(0, 10);
 
   console.log('[webhook] processing', { actorId, datasetId, runId, today });
 
-  // Fetch the actual scraped data from Apify
+  // Fetch the run details so we can see what URL it scraped
+  // (this is how we tell HireKey runs from competitor runs when both use the same actor)
+  let runInput;
+  try {
+    runInput = await fetchRunInput(runId);
+  } catch (err) {
+    console.error('[webhook] run input fetch failed', err);
+    return res.status(502).json({ error: 'Run input fetch failed' });
+  }
+
+  // Fetch the actual scraped data
   let items;
   try {
     items = await fetchDataset(datasetId);
@@ -88,12 +105,20 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, items: 0 });
   }
 
-  // Route to the right writer based on which actor produced this run
+  // Route based on actor + input
   try {
-    if (actorId === COMPANY_ACTOR_ID) {
-      await saveCompanyData(items, today, runId);
-    } else if (actorId === COMPETITOR_ACTOR_ID) {
-      await saveCompetitorData(items, today);
+    if (actorId === POSTS_ACTOR_ID) {
+      // Posts actor — only used for HireKey
+      await savePostData(items, today, runId);
+    } else if (actorId === COMPANY_ACTOR_ID) {
+      // Company actor — could be HireKey or competitors. Check the input URL.
+      const isHireKey = looksLikeHireKey(runInput);
+      console.log('[webhook] company actor run', { isHireKey, runInput: summarizeInput(runInput) });
+      if (isHireKey) {
+        await saveSnapshotData(items, today, runId);
+      } else {
+        await saveCompetitorData(items, today);
+      }
     } else {
       console.warn('[webhook] unknown actor, ignoring', { actorId });
       return res.status(200).json({ ok: true, ignored: true, reason: 'unknown actor' });
@@ -106,7 +131,7 @@ export default async function handler(req, res) {
   return res.status(200).json({ ok: true, items: items.length, runId, date: today });
 }
 
-// ---------- Apify dataset fetch ----------
+// ---------- Apify API calls ----------
 
 async function fetchDataset(datasetId) {
   const url = `https://api.apify.com/v2/datasets/${datasetId}/items?clean=true&format=json`;
@@ -119,95 +144,59 @@ async function fetchDataset(datasetId) {
   return resp.json();
 }
 
-// ---------- Company writer ----------
-//
-// The company scraper returns a mix of profile data and post data.
-// Exact field names from your specific Apify actor are unknown until first
-// run, so this code:
-//   1. Logs the raw sample so we can verify mappings on first run
-//   2. Stores everything raw in linkedin_snapshots.raw_api_response (jsonb)
-//      so missing/wrong mappings can be fixed in SQL without re-scraping
-//   3. Maps the fields most likely to be present, with sensible fallbacks
-//
-async function saveCompanyData(items, today, runId) {
-  console.log('[webhook] sample company item:', JSON.stringify(items[0], null, 2));
-  console.log('[webhook] total items:', items.length);
-
-  // Split items into profile vs. posts. Most Apify LinkedIn company scrapers
-  // return either: (a) one item with a `posts` array nested inside, or
-  // (b) separate items for the company and each post. Handle both.
-  let profile = null;
-  let posts = [];
-
-  if (items.length === 1 && Array.isArray(items[0].posts)) {
-    // Shape (a): single item with nested posts
-    profile = items[0];
-    posts = items[0].posts || [];
-  } else {
-    // Shape (b): split by heuristic
-    profile = items.find(
-      (i) => i.followerCount != null || i.followers != null || i.type === 'profile'
-    ) || items[0];
-    posts = items.filter(
-      (i) => i.postId || i.urn || i.postUrl || i.type === 'post'
-    );
+async function fetchRunInput(runId) {
+  const url = `https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_API_KEY}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`Apify run fetch ${resp.status}: ${await resp.text()}`);
   }
+  const data = await resp.json();
+  // The run's input is stored in another key-value store; fetch it
+  const inputStoreId = data?.data?.defaultKeyValueStoreId;
+  if (!inputStoreId) return null;
+  const inputResp = await fetch(
+    `https://api.apify.com/v2/key-value-stores/${inputStoreId}/records/INPUT?token=${APIFY_API_KEY}`
+  );
+  if (!inputResp.ok) return null;
+  return inputResp.json();
+}
 
-  // ---- Build snapshot row ----
+// ---------- Routing helpers ----------
+
+function looksLikeHireKey(input) {
+  if (!input || !HIREKEY_URL_FRAGMENT) return false;
+  const inputStr = JSON.stringify(input).toLowerCase();
+  return inputStr.includes(HIREKEY_URL_FRAGMENT.toLowerCase());
+}
+
+function summarizeInput(input) {
+  if (!input) return null;
+  // Pull common URL fields without dumping the entire input to logs
+  return {
+    companyUrls: input.companyUrls ?? input.urls ?? input.startUrls ?? null,
+    company: input.company ?? input.companyName ?? null,
+  };
+}
+
+// ---------- Snapshot writer (HireKey company profile) ----------
+
+async function saveSnapshotData(items, today, runId) {
+  console.log('[webhook] sample snapshot item:', JSON.stringify(items[0], null, 2));
+
+  const profile = items[0]; // Company actor typically returns one item per company
+
   const snapshot = {
     company_id: COMPANY_ID,
     snapshot_date: today,
-    followers_count: pickNumber(profile, ['followerCount', 'followers', 'followersCount']),
-    page_visitors: pickNumber(profile, ['pageViews', 'visitors', 'uniqueVisitors']),
-    profile_link_clicks: pickNumber(profile, ['profileLinkClicks', 'linkClicks', 'websiteClicks']),
-    followers_from_organic: pickNumber(profile, ['organicFollowers', 'followersFromOrganic']),
-    followers_from_post_engagement: pickNumber(profile, [
-      'followersFromPostEngagement',
-      'postEngagementFollowers',
-    ]),
-    followers_from_direct_visit: pickNumber(profile, [
-      'followersFromDirectVisit',
-      'directVisitFollowers',
-    ]),
-    total_impressions: sumPostField(posts, ['impressions', 'impressionCount']),
+    followers_count: pickNumber(profile, ['followerCount', 'followers', 'followersCount', 'followers_count']),
     unique_reach: pickNumber(profile, ['uniqueReach', 'reach']),
-    avg_click_through_rate: avgPostField(posts, ['clickThroughRate', 'ctr']),
-    follower_conversion_rate: pickNumber(profile, ['followerConversionRate']),
-    organic_posts: posts.filter((p) => p.isOrganic !== false && !p.isSponsored).length || null,
-    non_organic_posts: posts.filter((p) => p.isSponsored === true).length || null,
-    organic_engagement_rate: avgPostField(
-      posts.filter((p) => !p.isSponsored),
-      ['engagementRate']
-    ),
-    non_organic_engagement_rate: avgPostField(
-      posts.filter((p) => p.isSponsored),
-      ['engagementRate']
-    ),
-    visitor_job_titles: profile?.visitorJobTitles ?? profile?.demographics?.jobTitles ?? null,
-    visitor_industries: profile?.visitorIndustries ?? profile?.demographics?.industries ?? null,
-    visitor_company_sizes:
-      profile?.visitorCompanySizes ?? profile?.demographics?.companySizes ?? null,
-    raw_api_response: { profile, postCount: posts.length, runId }, // for debugging mappings
+    raw_api_response: { profile, runId, source: 'company_actor' },
   };
 
-  // Top post (highest engagement count today)
-  if (posts.length) {
-    const topPost = [...posts].sort(
-      (a, b) =>
-        (b.engagementCount ?? b.engagement ?? 0) - (a.engagementCount ?? a.engagement ?? 0)
-    )[0];
-    snapshot.top_post_id = topPost.postId ?? topPost.urn ?? topPost.id ?? null;
-    snapshot.top_post_title =
-      truncate(topPost.title ?? topPost.text ?? '', 250) || null;
-    snapshot.top_post_engagement = pickNumber(topPost, ['engagementCount', 'engagement']);
-    snapshot.top_post_engagement_rate = pickNumber(topPost, ['engagementRate']);
-    snapshot.top_post_impressions = pickNumber(topPost, ['impressions', 'impressionCount']);
-  }
-
-  // ---- Compute deltas from yesterday's snapshot (if exists) ----
+  // Compute delta from yesterday's snapshot (if exists)
   const { data: prev } = await supabase
     .from('linkedin_snapshots')
-    .select('followers_count, page_visitors, profile_link_clicks')
+    .select('followers_count')
     .eq('company_id', COMPANY_ID)
     .lt('snapshot_date', today)
     .order('snapshot_date', { ascending: false })
@@ -216,68 +205,91 @@ async function saveCompanyData(items, today, runId) {
 
   if (prev) {
     snapshot.followers_delta = diff(snapshot.followers_count, prev.followers_count);
-    snapshot.page_visitors_delta = diff(snapshot.page_visitors, prev.page_visitors);
-    snapshot.profile_link_clicks_delta = diff(
-      snapshot.profile_link_clicks,
-      prev.profile_link_clicks
-    );
   }
 
-  // ---- Upsert snapshot (unique on company_id + snapshot_date) ----
-  {
-    const { error } = await supabase
-      .from('linkedin_snapshots')
-      .upsert(snapshot, { onConflict: 'company_id,snapshot_date' });
-    if (error) throw new Error(`linkedin_snapshots upsert: ${error.message}`);
-    console.log('[webhook] snapshot upserted');
+  const { error } = await supabase
+    .from('linkedin_snapshots')
+    .upsert(snapshot, { onConflict: 'company_id,snapshot_date' });
+  if (error) throw new Error(`linkedin_snapshots upsert: ${error.message}`);
+  console.log('[webhook] snapshot upserted');
+}
+
+// ---------- Post writer (HireKey post performance) ----------
+
+async function savePostData(items, today, runId) {
+  console.log('[webhook] sample post item:', JSON.stringify(items[0], null, 2));
+  console.log('[webhook] total posts:', items.length);
+
+  if (!items.length) return;
+
+  // Upsert post-level rows
+  const postRows = items.map((p) => ({
+    company_id: COMPANY_ID,
+    post_id: String(p.postId ?? p.urn ?? p.id ?? p.activityUrn ?? ''),
+    snapshot_date: today,
+    post_title: truncate(p.title ?? '', 250) || null,
+    post_snippet: typeof p.text === 'string' ? p.text.slice(0, 2000)
+                  : typeof p.content === 'string' ? p.content.slice(0, 2000)
+                  : null,
+    post_type: p.postType ?? p.contentType ?? p.type ?? null,
+    post_published_at: p.publishedAt ?? p.postedAt ?? p.publishedDate ?? p.timestamp ?? null,
+    post_url: p.postUrl ?? p.url ?? null,
+    impressions: pickNumber(p, ['impressions', 'impressionCount', 'views']),
+    unique_reach: pickNumber(p, ['uniqueReach', 'reach']),
+    engagement_count: pickNumber(p, ['engagementCount', 'engagement', 'totalReactions']),
+    engagement_rate: pickNumber(p, ['engagementRate']),
+    likes: pickNumber(p, ['likes', 'reactions', 'reactionCount', 'numLikes']),
+    comments: pickNumber(p, ['comments', 'commentCount', 'numComments']),
+    shares: pickNumber(p, ['shares', 'reposts', 'shareCount', 'numShares']),
+    click_through_rate: pickNumber(p, ['clickThroughRate', 'ctr']),
+    hashtags: extractHashtags(p.text ?? p.content ?? p.snippet ?? ''),
+  }));
+
+  const validPostRows = postRows.filter((p) => p.post_id);
+  if (!validPostRows.length) {
+    console.warn('[webhook] no valid post rows after mapping');
+    return;
   }
 
-  // ---- Upsert posts (unique on company_id + post_id + snapshot_date) ----
-  if (posts.length) {
-    const postRows = posts.map((p) => ({
-      company_id: COMPANY_ID,
-      post_id: String(p.postId ?? p.urn ?? p.id ?? ''),
-      snapshot_date: today,
-      post_title: truncate(p.title ?? '', 250) || null,
-      post_snippet: typeof p.text === 'string' ? p.text.slice(0, 2000) : null,
-      post_type: p.postType ?? p.contentType ?? p.type ?? null,
-      post_published_at: p.publishedAt ?? p.postedAt ?? p.publishedDate ?? null,
-      post_url: p.postUrl ?? p.url ?? null,
-      impressions: pickNumber(p, ['impressions', 'impressionCount']),
-      unique_reach: pickNumber(p, ['uniqueReach', 'reach']),
-      engagement_count: pickNumber(p, ['engagementCount', 'engagement']),
-      engagement_rate: pickNumber(p, ['engagementRate']),
-      likes: pickNumber(p, ['likes', 'reactions', 'reactionCount']),
-      comments: pickNumber(p, ['comments', 'commentCount']),
-      shares: pickNumber(p, ['shares', 'reposts', 'shareCount']),
-      click_through_rate: pickNumber(p, ['clickThroughRate', 'ctr']),
-      hashtags: extractHashtags(p.text ?? p.snippet ?? ''),
-    }));
+  const { error: postsError } = await supabase
+    .from('linkedin_posts')
+    .upsert(validPostRows, { onConflict: 'company_id,post_id,snapshot_date' });
+  if (postsError) throw new Error(`linkedin_posts upsert: ${postsError.message}`);
+  console.log('[webhook] posts upserted:', validPostRows.length);
 
-    const validPostRows = postRows.filter((p) => p.post_id);
-    if (validPostRows.length) {
-      const { error } = await supabase
-        .from('linkedin_posts')
-        .upsert(validPostRows, { onConflict: 'company_id,post_id,snapshot_date' });
-      if (error) throw new Error(`linkedin_posts upsert: ${error.message}`);
-      console.log('[webhook] posts upserted:', validPostRows.length);
-    }
-  }
+  // Update today's snapshot with aggregated post stats (won't overwrite follower count)
+  const totalImpressions = sumPostField(items, ['impressions', 'impressionCount', 'views']);
+  const topPost = [...items].sort(
+    (a, b) =>
+      (b.engagementCount ?? b.engagement ?? 0) - (a.engagementCount ?? a.engagement ?? 0)
+  )[0];
 
-  // ---- Aggregate hashtag performance for today ----
+  const snapshotUpdate = {
+    company_id: COMPANY_ID,
+    snapshot_date: today,
+    total_impressions: totalImpressions,
+    top_post_id: topPost ? String(topPost.postId ?? topPost.urn ?? topPost.id ?? '') : null,
+    top_post_title: topPost ? truncate(topPost.title ?? topPost.text ?? '', 250) || null : null,
+    top_post_engagement: topPost ? pickNumber(topPost, ['engagementCount', 'engagement']) : null,
+    top_post_engagement_rate: topPost ? pickNumber(topPost, ['engagementRate']) : null,
+    top_post_impressions: topPost ? pickNumber(topPost, ['impressions', 'impressionCount']) : null,
+  };
+
+  const { error: snapError } = await supabase
+    .from('linkedin_snapshots')
+    .upsert(snapshotUpdate, { onConflict: 'company_id,snapshot_date' });
+  if (snapError) throw new Error(`linkedin_snapshots (post-aggregate) upsert: ${snapError.message}`);
+  console.log('[webhook] snapshot updated with post aggregates');
+
+  // Aggregate hashtag performance for today
   const hashtagMap = new Map();
-  for (const p of posts) {
-    const tags = extractHashtags(p.text ?? p.snippet ?? '');
-    const impressions = Number(pickNumber(p, ['impressions', 'impressionCount']) ?? 0);
+  for (const p of items) {
+    const tags = extractHashtags(p.text ?? p.content ?? p.snippet ?? '');
+    const impressions = Number(pickNumber(p, ['impressions', 'impressionCount', 'views']) ?? 0);
     const reach = Number(pickNumber(p, ['uniqueReach', 'reach']) ?? 0);
     const engRate = Number(pickNumber(p, ['engagementRate']) ?? 0);
     for (const tag of tags) {
-      const cur = hashtagMap.get(tag) ?? {
-        uses: 0,
-        impressions: 0,
-        reach: 0,
-        engRateSum: 0,
-      };
+      const cur = hashtagMap.get(tag) ?? { uses: 0, impressions: 0, reach: 0, engRateSum: 0 };
       cur.uses += 1;
       cur.impressions += impressions;
       cur.reach += reach;
@@ -295,7 +307,6 @@ async function saveCompanyData(items, today, runId) {
       avg_reach: t.uses ? t.reach / t.uses : null,
       avg_engagement_rate: t.uses ? t.engRateSum / t.uses : null,
     }));
-
     const { error } = await supabase
       .from('linkedin_hashtag_performance')
       .upsert(hashtagRows, { onConflict: 'hashtag,snapshot_date' });
@@ -314,18 +325,17 @@ async function saveCompetitorData(items, today) {
     .map((c) => ({
       competitor_name: c.name ?? c.companyName ?? c.title ?? null,
       snapshot_date: today,
-      competitor_company_id: c.companyId ?? c.id ?? null,
+      competitor_company_id: c.companyId ? String(c.companyId) : c.id ? String(c.id) : null,
       competitor_linkedin_slug: c.slug ?? c.universalName ?? c.linkedinSlug ?? null,
       followers_count: pickNumber(c, ['followerCount', 'followers', 'followersCount']),
     }))
-    .filter((r) => r.competitor_name); // skip if no name
+    .filter((r) => r.competitor_name);
 
   if (!rows.length) {
     console.warn('[webhook] no valid competitor rows after mapping');
     return;
   }
 
-  // Compute deltas: look up most recent prior snapshot for each competitor
   for (const row of rows) {
     const { data: prev } = await supabase
       .from('linkedin_competitors')
@@ -369,12 +379,6 @@ function sumPostField(posts, keys) {
     }
   }
   return found ? total : null;
-}
-
-function avgPostField(posts, keys) {
-  const vals = posts.map((p) => pickNumber(p, keys)).filter((v) => v != null);
-  if (!vals.length) return null;
-  return vals.reduce((a, b) => a + b, 0) / vals.length;
 }
 
 function diff(today, yesterday) {
