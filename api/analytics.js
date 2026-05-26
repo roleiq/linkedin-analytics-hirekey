@@ -1,8 +1,8 @@
 /**
  * LinkedIn Analytics — Main Snapshot Capture
  * Uses HarvestAPI actors (no cookie required):
- *   - uIC0SYhuxZ6dwKIiq       → follower count, company details
- *   - WI0tj4Ieb5Kq458gB → post performance data
+ *   - harvestapi~linkedin-company       → follower count, company details
+ *   - harvestapi~linkedin-company-posts → post performance data
  *
  * Runs daily at 8 AM PST via Vercel cron
  */
@@ -62,7 +62,7 @@ async function captureSnapshot() {
   const today = new Date().toISOString().split('T')[0];
 
   // ── Run Company Details actor ─────────────────────────────
-  const companyResults = await runApifyActor('uIC0SYhuxZ6dwKIiq', {
+  const companyResults = await runApifyActor('harvestapi~linkedin-company', {
     urls: [LINKEDIN_COMPANY_URL],
   });
 
@@ -74,7 +74,7 @@ async function captureSnapshot() {
   const followersCount = company.followerCount || 0;
 
   // ── Run Company Posts actor ───────────────────────────────
-  const postsResults = await runApifyActor('WI0tj4Ieb5Kq458gB', {
+  const postsResults = await runApifyActor('harvestapi~linkedin-company-posts', {
     urls: [LINKEDIN_COMPANY_URL],
     maxPostsPerInput: 20,
   });
