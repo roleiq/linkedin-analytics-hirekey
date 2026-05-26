@@ -1,13 +1,9 @@
 /**
- * LinkedIn Analytics — Webhook Receiver
+ * LinkedIn Analytics — Main Snapshot Capture
+ * Uses Apify synchronous run-and-wait endpoint
+ * which returns results directly without polling or webhooks
  *
- * NEW ARCHITECTURE:
- * Apify runs on its own schedule → sends results here via webhook → saves to Supabase
- * This solves the Vercel timeout issue entirely.
- *
- * POST /api/analytics        → receives Apify webhook data (called by Apify)
- * POST /api/analytics?manual → triggers immediate Apify run (called manually)
- * GET  /api/analytics        → serves dashboard data (called by frontend)
+ * Runs daily at 8 AM PST via Vercel cron
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -19,9 +15,24 @@ const supabase = createClient(
 );
 
 const LINKEDIN_COMPANY_URL = 'https://www.linkedin.com/company/114124073/';
-const APIFY_API_KEY = process.env.APIFY_API_KEY;
-const COMPANY_ACTOR_ID = 'harvestapi~linkedin-company';
-const POSTS_ACTOR_ID = 'harvestapi~linkedin-company-posts';
+
+// ============================================================
+// APIFY RUNNER — uses synchronous endpoint (waits for result)
+// ============================================================
+
+async function runApifySync(actorId, input) {
+  const apiKey = process.env.APIFY_API_KEY;
+
+  // run-sync-get-dataset-items waits for completion and returns items directly
+  // timeout=120 tells Apify to wait up to 120 seconds
+  const res = await axios.post(
+    `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${apiKey}&timeout=120`,
+    input,
+    { timeout: 130000 } // axios timeout slightly longer than Apify timeout
+  );
+
+  return res.data || [];
+}
 
 // ============================================================
 // SAVE TO SUPABASE
@@ -46,16 +57,12 @@ async function saveToSupabase(companyData, postsData) {
 
   // Avg engagement rate across posts
   const totalEng = posts.reduce((sum, p) => {
-    const l = p.engagement?.likes    || 0;
-    const c = p.engagement?.comments || 0;
-    const s = p.engagement?.shares   || 0;
-    return sum + l + c + s;
+    return sum + (p.engagement?.likes || 0) + (p.engagement?.comments || 0) + (p.engagement?.shares || 0);
   }, 0);
   const avgEngRate = posts.length > 0 && followersCount > 0
     ? (totalEng / posts.length / followersCount) * 100
     : null;
 
-  // ── Snapshot ──────────────────────────────────────────────
   const snapshot = {
     company_id: companyId,
     snapshot_date: today,
@@ -165,33 +172,26 @@ async function saveToSupabase(companyData, postsData) {
 }
 
 // ============================================================
-// TRIGGER APIFY RUNS (fire and forget)
+// CAPTURE SNAPSHOT
 // ============================================================
 
-async function triggerApifyRuns(webhookUrl) {
-  const base = 'https://api.apify.com/v2';
+async function captureSnapshot() {
+  // Run both actors using synchronous endpoint
+  const [companyResults, postsResults] = await Promise.all([
+    runApifySync('harvestapi~linkedin-company', {
+      urls: [LINKEDIN_COMPANY_URL],
+    }),
+    runApifySync('harvestapi~linkedin-company-posts', {
+      urls: [LINKEDIN_COMPANY_URL],
+      maxPostsPerInput: 20,
+    }),
+  ]);
 
-  const webhook = {
-    eventTypes: ['ACTOR.RUN.SUCCEEDED'],
-    requestUrl: webhookUrl,
-    payloadTemplate: '{"resource":{{resource}}}',
-  };
+  if (!companyResults || companyResults.length === 0) {
+    throw new Error('No results from Company Details actor');
+  }
 
-  // Trigger company details run
-  await axios.post(
-    `${base}/acts/${COMPANY_ACTOR_ID}/runs?token=${APIFY_API_KEY}`,
-    { urls: [LINKEDIN_COMPANY_URL] },
-    { params: { webhooks: JSON.stringify([{ ...webhook, idempotencyKey: `company-${Date.now()}` }]) } }
-  );
-
-  // Trigger posts run
-  await axios.post(
-    `${base}/acts/${POSTS_ACTOR_ID}/runs?token=${APIFY_API_KEY}`,
-    { urls: [LINKEDIN_COMPANY_URL], maxPostsPerInput: 20 },
-    { params: { webhooks: JSON.stringify([{ ...webhook, idempotencyKey: `posts-${Date.now()}` }]) } }
-  );
-
-  return { triggered: true };
+  return await saveToSupabase(companyResults[0], postsResults || []);
 }
 
 // ============================================================
@@ -206,74 +206,15 @@ export default async function handler(req, res) {
 
   const companyId = process.env.COMPANY_ID;
 
-  // ── POST: receive Apify webhook OR manual trigger ─────────
   if (req.method === 'POST') {
-    const { manual } = req.query;
-
-    // Manual trigger — fire Apify runs and return immediately
-    if (manual === 'true') {
-      try {
-        const host = req.headers.host;
-        const proto = host.includes('localhost') ? 'http' : 'https';
-        const webhookUrl = `${proto}://${host}/api/analytics`;
-        await triggerApifyRuns(webhookUrl);
-        return res.status(200).json({ success: true, message: 'Apify runs triggered. Data will appear in ~2 minutes.' });
-      } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
-      }
-    }
-
-    // Webhook receiver — Apify sends results here when done
     try {
-      const body = req.body;
-
-      // Apify sends { resource: { ... } } with run info
-      // We need to fetch the actual dataset items
-      const runId = body?.resource?.id;
-      const actId = body?.resource?.actId;
-
-      if (!runId || !actId) {
-        return res.status(400).json({ error: 'Invalid webhook payload' });
-      }
-
-      // Fetch dataset items from this run
-      const resultsRes = await axios.get(
-        `https://api.apify.com/v2/actor-runs/${runId}/dataset/items?token=${APIFY_API_KEY}`
-      );
-      const items = resultsRes.data || [];
-
-      if (items.length === 0) {
-        return res.status(200).json({ success: true, message: 'No items in dataset' });
-      }
-
-      // Determine which actor finished and save accordingly
-      // Company actor: items have followerCount
-      // Posts actor: items have engagement object
-      const isCompanyActor = items[0]?.followerCount !== undefined;
-      const isPostsActor   = items[0]?.engagement !== undefined;
-
-      if (isCompanyActor) {
-        // Save company snapshot with empty posts for now
-        await saveToSupabase(items[0], []);
-      } else if (isPostsActor) {
-        // Get latest company snapshot to get follower count
-        const { data: latest } = await supabase
-          .from('linkedin_snapshots')
-          .select('followers_count, raw_api_response')
-          .eq('company_id', companyId)
-          .order('snapshot_date', { ascending: false })
-          .limit(1);
-        const companyData = { followerCount: latest?.[0]?.followers_count || 0 };
-        await saveToSupabase(companyData, items);
-      }
-
-      return res.status(200).json({ success: true, itemsReceived: items.length });
+      const result = await captureSnapshot();
+      return res.status(200).json(result);
     } catch (err) {
       return res.status(500).json({ success: false, error: err.message, stack: err.stack });
     }
   }
 
-  // ── GET: serve dashboard data ─────────────────────────────
   if (req.method === 'GET') {
     const { action, days = 90 } = req.query;
 
