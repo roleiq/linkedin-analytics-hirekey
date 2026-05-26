@@ -223,27 +223,57 @@ async function savePostData(items, today, runId) {
   if (!items.length) return;
 
   // Upsert post-level rows
-  const postRows = items.map((p) => ({
-    company_id: COMPANY_ID,
-    post_id: String(p.postId ?? p.urn ?? p.id ?? p.activityUrn ?? ''),
-    snapshot_date: today,
-    post_title: truncate(p.title ?? '', 250) || null,
-    post_snippet: typeof p.text === 'string' ? p.text.slice(0, 2000)
-                  : typeof p.content === 'string' ? p.content.slice(0, 2000)
-                  : null,
-    post_type: p.postType ?? p.contentType ?? p.type ?? null,
-    post_published_at: p.publishedAt ?? p.postedAt ?? p.publishedDate ?? p.timestamp ?? null,
-    post_url: p.postUrl ?? p.url ?? null,
-    impressions: pickNumber(p, ['impressions', 'impressionCount', 'views']),
-    unique_reach: pickNumber(p, ['uniqueReach', 'reach']),
-    engagement_count: pickNumber(p, ['engagementCount', 'engagement', 'totalReactions']),
-    engagement_rate: pickNumber(p, ['engagementRate']),
-    likes: pickNumber(p, ['likes', 'reactions', 'reactionCount', 'numLikes']),
-    comments: pickNumber(p, ['comments', 'commentCount', 'numComments']),
-    shares: pickNumber(p, ['shares', 'reposts', 'shareCount', 'numShares']),
-    click_through_rate: pickNumber(p, ['clickThroughRate', 'ctr']),
-    hashtags: extractHashtags(p.text ?? p.content ?? p.snippet ?? ''),
-  }));
+  // Field mappings calibrated to harvestapi/linkedin-company-posts output shape:
+  //   - id / entityId: LinkedIn post numeric ID
+  //   - content: post text body
+  //   - linkedinUrl: full URL to the post
+  //   - postedAt: object with .date (ISO string) and .timestamp (unix ms)
+  //   - engagement: object with .likes, .comments, .shares
+  //   - type: "post" (string)
+  // Fields not available without admin auth (left null):
+  //   - impressions, unique_reach, engagement_rate, click_through_rate
+  const postRows = items.map((p) => {
+    // postedAt is an object: { timestamp, date, postedAgoShort, postedAgoText }
+    // Use postedAt.date (ISO string) for the Postgres timestamp column
+    const postedAtRaw = p.postedAt;
+    let postPublishedAt = null;
+    if (typeof postedAtRaw === 'string') {
+      postPublishedAt = postedAtRaw;
+    } else if (postedAtRaw && typeof postedAtRaw === 'object') {
+      postPublishedAt = postedAtRaw.date ?? null;
+    }
+
+    // engagement is an object with nested counts
+    const eng = p.engagement && typeof p.engagement === 'object' ? p.engagement : {};
+    const engagementCount =
+      (Number(eng.likes ?? 0) || 0) +
+      (Number(eng.comments ?? 0) || 0) +
+      (Number(eng.shares ?? 0) || 0);
+
+    return {
+      company_id: COMPANY_ID,
+      post_id: String(p.id ?? p.entityId ?? p.postId ?? p.urn ?? ''),
+      snapshot_date: today,
+      post_title: null, // harvestapi returns content, not separate title
+      post_snippet: typeof p.content === 'string'
+        ? p.content.slice(0, 2000)
+        : typeof p.text === 'string'
+        ? p.text.slice(0, 2000)
+        : null,
+      post_type: p.type ?? p.postType ?? p.contentType ?? null,
+      post_published_at: postPublishedAt,
+      post_url: p.linkedinUrl ?? p.shareLinkedinUrl ?? p.postUrl ?? p.url ?? null,
+      impressions: pickNumber(p, ['impressions', 'impressionCount', 'views']),
+      unique_reach: pickNumber(p, ['uniqueReach', 'reach']),
+      engagement_count: engagementCount > 0 ? engagementCount : null,
+      engagement_rate: pickNumber(p, ['engagementRate']),
+      likes: pickNumber(eng, ['likes']) ?? pickNumber(p, ['likes', 'reactionCount', 'numLikes']),
+      comments: pickNumber(eng, ['comments']) ?? pickNumber(p, ['comments', 'commentCount', 'numComments']),
+      shares: pickNumber(eng, ['shares']) ?? pickNumber(p, ['shares', 'reposts', 'shareCount', 'numShares']),
+      click_through_rate: pickNumber(p, ['clickThroughRate', 'ctr']),
+      hashtags: extractHashtags(p.content ?? p.text ?? p.snippet ?? ''),
+    };
+  });
 
   const validPostRows = postRows.filter((p) => p.post_id);
   if (!validPostRows.length) {
@@ -258,19 +288,28 @@ async function savePostData(items, today, runId) {
   console.log('[webhook] posts upserted:', validPostRows.length);
 
   // Update today's snapshot with aggregated post stats (won't overwrite follower count)
+  // Helper: derive total engagement for a post from harvestapi's nested shape
+  const getPostEngagement = (p) => {
+    if (p.engagement && typeof p.engagement === 'object') {
+      return (Number(p.engagement.likes ?? 0) || 0)
+           + (Number(p.engagement.comments ?? 0) || 0)
+           + (Number(p.engagement.shares ?? 0) || 0);
+    }
+    return Number(p.engagementCount ?? 0) || 0;
+  };
+
   const totalImpressions = sumPostField(items, ['impressions', 'impressionCount', 'views']);
-  const topPost = [...items].sort(
-    (a, b) =>
-      (b.engagementCount ?? b.engagement ?? 0) - (a.engagementCount ?? a.engagement ?? 0)
-  )[0];
+  const topPost = [...items].sort((a, b) => getPostEngagement(b) - getPostEngagement(a))[0];
 
   const snapshotUpdate = {
     company_id: COMPANY_ID,
     snapshot_date: today,
     total_impressions: totalImpressions,
-    top_post_id: topPost ? String(topPost.postId ?? topPost.urn ?? topPost.id ?? '') : null,
-    top_post_title: topPost ? truncate(topPost.title ?? topPost.text ?? '', 250) || null : null,
-    top_post_engagement: topPost ? pickNumber(topPost, ['engagementCount', 'engagement']) : null,
+    top_post_id: topPost ? String(topPost.id ?? topPost.entityId ?? topPost.postId ?? '') : null,
+    top_post_title: topPost
+      ? truncate(typeof topPost.content === 'string' ? topPost.content : (topPost.title ?? topPost.text ?? ''), 250) || null
+      : null,
+    top_post_engagement: topPost ? getPostEngagement(topPost) || null : null,
     top_post_engagement_rate: topPost ? pickNumber(topPost, ['engagementRate']) : null,
     top_post_impressions: topPost ? pickNumber(topPost, ['impressions', 'impressionCount']) : null,
   };
@@ -284,7 +323,7 @@ async function savePostData(items, today, runId) {
   // Aggregate hashtag performance for today
   const hashtagMap = new Map();
   for (const p of items) {
-    const tags = extractHashtags(p.text ?? p.content ?? p.snippet ?? '');
+    const tags = extractHashtags(p.content ?? p.text ?? p.snippet ?? '');
     const impressions = Number(pickNumber(p, ['impressions', 'impressionCount', 'views']) ?? 0);
     const reach = Number(pickNumber(p, ['uniqueReach', 'reach']) ?? 0);
     const engRate = Number(pickNumber(p, ['engagementRate']) ?? 0);
