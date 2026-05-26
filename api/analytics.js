@@ -176,20 +176,19 @@ async function saveToSupabase(companyData, postsData) {
 // ============================================================
 
 async function captureSnapshot() {
-  // Run both actors using synchronous endpoint
-  const [companyResults, postsResults] = await Promise.all([
-    runApifySync('harvestapi~linkedin-company', {
-      urls: [LINKEDIN_COMPANY_URL],
-    }),
-    runApifySync('harvestapi~linkedin-company-posts', {
-      urls: [LINKEDIN_COMPANY_URL],
-      maxPostsPerInput: 20,
-    }),
-  ]);
+  // Run actors one at a time to avoid overwhelming the sync endpoint
+  const companyResults = await runApifySync('harvestapi~linkedin-company', {
+    urls: [LINKEDIN_COMPANY_URL],
+  });
 
   if (!companyResults || companyResults.length === 0) {
     throw new Error('No results from Company Details actor');
   }
+
+  const postsResults = await runApifySync('harvestapi~linkedin-company-posts', {
+    urls: [LINKEDIN_COMPANY_URL],
+    maxPostsPerInput: 20,
+  });
 
   return await saveToSupabase(companyResults[0], postsResults || []);
 }
