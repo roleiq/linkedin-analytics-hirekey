@@ -1,10 +1,13 @@
 /**
- * LinkedIn Analytics — Main Snapshot Capture
- * Uses HarvestAPI actors (no cookie required):
- *   - harvestapi~linkedin-company       → follower count, company details
- *   - harvestapi~linkedin-company-posts → post performance data
+ * LinkedIn Analytics — Webhook Receiver
  *
- * Runs daily at 8 AM PST via Vercel cron
+ * NEW ARCHITECTURE:
+ * Apify runs on its own schedule → sends results here via webhook → saves to Supabase
+ * This solves the Vercel timeout issue entirely.
+ *
+ * POST /api/analytics        → receives Apify webhook data (called by Apify)
+ * POST /api/analytics?manual → triggers immediate Apify run (called manually)
+ * GET  /api/analytics        → serves dashboard data (called by frontend)
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -16,97 +19,48 @@ const supabase = createClient(
 );
 
 const LINKEDIN_COMPANY_URL = 'https://www.linkedin.com/company/114124073/';
+const APIFY_API_KEY = process.env.APIFY_API_KEY;
+const COMPANY_ACTOR_ID = 'harvestapi~linkedin-company';
+const POSTS_ACTOR_ID = 'harvestapi~linkedin-company-posts';
 
 // ============================================================
-// APIFY RUNNER
+// SAVE TO SUPABASE
 // ============================================================
 
-async function runApifyActor(actorId, input) {
-  const apiKey = process.env.APIFY_API_KEY;
-  const base = 'https://api.apify.com/v2';
-
-  const startRes = await axios.post(
-    `${base}/acts/${actorId}/runs?token=${apiKey}`,
-    input
-  );
-  const runId = startRes.data.data.id;
-
-  // Poll for completion (max 120 seconds)
-  let status = 'RUNNING';
-  let attempts = 0;
-  while (status === 'RUNNING' && attempts < 120) {
-    await new Promise((r) => setTimeout(r, 1000));
-    const statusRes = await axios.get(
-      `${base}/acts/${actorId}/runs/${runId}?token=${apiKey}`
-    );
-    status = statusRes.data.data.status;
-    attempts++;
-  }
-
-  if (status !== 'SUCCEEDED') {
-    throw new Error(`Apify run ${runId} ended with status: ${status}`);
-  }
-
-  const resultsRes = await axios.get(
-    `${base}/acts/${actorId}/runs/${runId}/dataset/items?token=${apiKey}`
-  );
-  return resultsRes.data;
-}
-
-// ============================================================
-// SNAPSHOT CAPTURE
-// ============================================================
-
-async function captureSnapshot() {
+async function saveToSupabase(companyData, postsData) {
   const companyId = process.env.COMPANY_ID;
   const today = new Date().toISOString().split('T')[0];
 
-  // ── Run Company Details actor ─────────────────────────────
-  const companyResults = await runApifyActor('harvestapi~linkedin-company', {
-    urls: [LINKEDIN_COMPANY_URL],
-  });
+  const followersCount = companyData?.followerCount || 0;
 
-  if (!companyResults || companyResults.length === 0) {
-    throw new Error('No results from Company Details actor');
-  }
-
-  const company = companyResults[0];
-  const followersCount = company.followerCount || 0;
-
-  // ── Run Company Posts actor ───────────────────────────────
-  const postsResults = await runApifyActor('harvestapi~linkedin-company-posts', {
-    urls: [LINKEDIN_COMPANY_URL],
-    maxPostsPerInput: 20,
-  });
-
-  const posts = postsResults || [];
-
-  // ── Get previous snapshot for deltas ─────────────────────
+  // Get previous snapshot for delta
   const { data: prev } = await supabase
     .from('linkedin_snapshots')
-    .select('*')
+    .select('followers_count')
     .eq('company_id', companyId)
     .order('snapshot_date', { ascending: false })
     .limit(1);
-  const prevSnap = prev?.[0];
+  const prevFollowers = prev?.[0]?.followers_count || 0;
 
-  // ── Aggregate post engagement for snapshot ────────────────
-  const totalLikes    = posts.reduce((sum, p) => sum + (p.engagement?.likes    || 0), 0);
-  const totalComments = posts.reduce((sum, p) => sum + (p.engagement?.comments || 0), 0);
-  const totalShares   = posts.reduce((sum, p) => sum + (p.engagement?.shares   || 0), 0);
-  const totalEngagement = totalLikes + totalComments + totalShares;
-  const avgEngagementRate = posts.length > 0 && followersCount > 0
-    ? (totalEngagement / posts.length / followersCount) * 100
+  const posts = postsData || [];
+
+  // Avg engagement rate across posts
+  const totalEng = posts.reduce((sum, p) => {
+    const l = p.engagement?.likes    || 0;
+    const c = p.engagement?.comments || 0;
+    const s = p.engagement?.shares   || 0;
+    return sum + l + c + s;
+  }, 0);
+  const avgEngRate = posts.length > 0 && followersCount > 0
+    ? (totalEng / posts.length / followersCount) * 100
     : null;
 
-  // ── Build main snapshot ───────────────────────────────────
+  // ── Snapshot ──────────────────────────────────────────────
   const snapshot = {
     company_id: companyId,
     snapshot_date: today,
-
     followers_count: followersCount,
-    followers_delta: followersCount - (prevSnap?.followers_count || 0),
-
+    followers_delta: followersCount - prevFollowers,
     page_visitors: null,
     page_visitors_delta: null,
     profile_link_clicks: null,
@@ -114,39 +68,34 @@ async function captureSnapshot() {
     followers_from_organic: null,
     followers_from_post_engagement: null,
     followers_from_direct_visit: null,
+    total_impressions: null,
     unique_reach: null,
     avg_click_through_rate: null,
     follower_conversion_rate: null,
+    organic_posts: posts.length || null,
     non_organic_posts: null,
+    organic_engagement_rate: avgEngRate,
     non_organic_engagement_rate: null,
     visitor_job_titles: null,
     visitor_industries: null,
     visitor_company_sizes: null,
-
-    total_impressions: null,
-    organic_posts: posts.length || null,
-    organic_engagement_rate: avgEngagementRate,
-
-    // Top post (sorted by likes)
     top_post_id: posts[0]?.id || null,
     top_post_title: posts[0]?.content?.substring(0, 500) || null,
-    top_post_engagement: posts[0]?.engagement
-      ? (posts[0].engagement.likes || 0) + (posts[0].engagement.comments || 0) + (posts[0].engagement.shares || 0)
+    top_post_engagement: posts[0]
+      ? (posts[0].engagement?.likes || 0) + (posts[0].engagement?.comments || 0) + (posts[0].engagement?.shares || 0)
       : null,
     top_post_engagement_rate: posts[0] && followersCount > 0
       ? (((posts[0].engagement?.likes || 0) + (posts[0].engagement?.comments || 0) + (posts[0].engagement?.shares || 0)) / followersCount) * 100
       : null,
     top_post_impressions: null,
-
-    raw_api_response: { company, postsCount: posts.length },
+    raw_api_response: { company: companyData, postsCount: posts.length },
   };
 
-  // Upsert snapshot
   await supabase
     .from('linkedin_snapshots')
     .upsert([snapshot], { onConflict: 'company_id,snapshot_date' });
 
-  // ── Save post-level data ──────────────────────────────────
+  // ── Posts ─────────────────────────────────────────────────
   if (posts.length > 0) {
     const postRows = posts.map((post) => {
       const text     = post.content || '';
@@ -157,7 +106,6 @@ async function captureSnapshot() {
       const totalEng = likes + comments + shares;
       const engRate  = followersCount > 0 ? (totalEng / followersCount) * 100 : null;
 
-      // Detect post type
       let postType = 'text';
       if (post.postImages && post.postImages.length > 0) postType = 'image';
       if (post.contentAttributes && post.contentAttributes.length > 0) postType = 'document';
@@ -187,16 +135,13 @@ async function captureSnapshot() {
       .from('linkedin_posts')
       .upsert(postRows, { onConflict: 'company_id,post_id,snapshot_date' });
 
-    // ── Aggregate hashtag performance ─────────────────────
+    // ── Hashtags ───────────────────────────────────────────
     const hashtagMap = {};
     for (const post of postRows) {
-      if (!post.hashtags || post.hashtags.length === 0) continue;
-      for (const tag of post.hashtags) {
-        if (!hashtagMap[tag]) {
-          hashtagMap[tag] = { times_used: 0, total_engagement_rate: 0 };
-        }
-        hashtagMap[tag].times_used += 1;
-        hashtagMap[tag].total_engagement_rate += post.engagement_rate || 0;
+      for (const tag of (post.hashtags || [])) {
+        if (!hashtagMap[tag]) hashtagMap[tag] = { times_used: 0, total_eng_rate: 0 };
+        hashtagMap[tag].times_used++;
+        hashtagMap[tag].total_eng_rate += post.engagement_rate || 0;
       }
     }
 
@@ -205,7 +150,7 @@ async function captureSnapshot() {
       hashtag: tag,
       times_used: stats.times_used,
       avg_impressions: null,
-      avg_engagement_rate: stats.total_engagement_rate / stats.times_used,
+      avg_engagement_rate: stats.total_eng_rate / stats.times_used,
       avg_reach: null,
     }));
 
@@ -216,19 +161,44 @@ async function captureSnapshot() {
     }
   }
 
-  return {
-    success: true,
-    followersCount,
-    postsCaptures: posts.length,
-  };
+  return { success: true, followersCount, postsCaptures: posts.length };
 }
 
 // ============================================================
-// API HANDLER (Vercel Serverless Function)
+// TRIGGER APIFY RUNS (fire and forget)
+// ============================================================
+
+async function triggerApifyRuns(webhookUrl) {
+  const base = 'https://api.apify.com/v2';
+
+  const webhook = {
+    eventTypes: ['ACTOR.RUN.SUCCEEDED'],
+    requestUrl: webhookUrl,
+    payloadTemplate: '{"resource":{{resource}}}',
+  };
+
+  // Trigger company details run
+  await axios.post(
+    `${base}/acts/${COMPANY_ACTOR_ID}/runs?token=${APIFY_API_KEY}`,
+    { urls: [LINKEDIN_COMPANY_URL] },
+    { params: { webhooks: JSON.stringify([{ ...webhook, idempotencyKey: `company-${Date.now()}` }]) } }
+  );
+
+  // Trigger posts run
+  await axios.post(
+    `${base}/acts/${POSTS_ACTOR_ID}/runs?token=${APIFY_API_KEY}`,
+    { urls: [LINKEDIN_COMPANY_URL], maxPostsPerInput: 20 },
+    { params: { webhooks: JSON.stringify([{ ...webhook, idempotencyKey: `posts-${Date.now()}` }]) } }
+  );
+
+  return { triggered: true };
+}
+
+// ============================================================
+// API HANDLER
 // ============================================================
 
 export default async function handler(req, res) {
-  // ── CORS Headers ─────────────────────────────────────────
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -236,15 +206,74 @@ export default async function handler(req, res) {
 
   const companyId = process.env.COMPANY_ID;
 
+  // ── POST: receive Apify webhook OR manual trigger ─────────
   if (req.method === 'POST') {
+    const { manual } = req.query;
+
+    // Manual trigger — fire Apify runs and return immediately
+    if (manual === 'true') {
+      try {
+        const host = req.headers.host;
+        const proto = host.includes('localhost') ? 'http' : 'https';
+        const webhookUrl = `${proto}://${host}/api/analytics`;
+        await triggerApifyRuns(webhookUrl);
+        return res.status(200).json({ success: true, message: 'Apify runs triggered. Data will appear in ~2 minutes.' });
+      } catch (err) {
+        return res.status(500).json({ success: false, error: err.message });
+      }
+    }
+
+    // Webhook receiver — Apify sends results here when done
     try {
-      const result = await captureSnapshot();
-      return res.status(200).json(result);
+      const body = req.body;
+
+      // Apify sends { resource: { ... } } with run info
+      // We need to fetch the actual dataset items
+      const runId = body?.resource?.id;
+      const actId = body?.resource?.actId;
+
+      if (!runId || !actId) {
+        return res.status(400).json({ error: 'Invalid webhook payload' });
+      }
+
+      // Fetch dataset items from this run
+      const resultsRes = await axios.get(
+        `https://api.apify.com/v2/actor-runs/${runId}/dataset/items?token=${APIFY_API_KEY}`
+      );
+      const items = resultsRes.data || [];
+
+      if (items.length === 0) {
+        return res.status(200).json({ success: true, message: 'No items in dataset' });
+      }
+
+      // Determine which actor finished and save accordingly
+      // Company actor: items have followerCount
+      // Posts actor: items have engagement object
+      const isCompanyActor = items[0]?.followerCount !== undefined;
+      const isPostsActor   = items[0]?.engagement !== undefined;
+
+      if (isCompanyActor) {
+        // Save company snapshot with empty posts for now
+        await saveToSupabase(items[0], []);
+      } else if (isPostsActor) {
+        // Get latest company snapshot to get follower count
+        const { data: latest } = await supabase
+          .from('linkedin_snapshots')
+          .select('followers_count, raw_api_response')
+          .eq('company_id', companyId)
+          .order('snapshot_date', { ascending: false })
+          .limit(1);
+        const companyData = { followerCount: latest?.[0]?.followers_count || 0 };
+        await saveToSupabase(companyData, items);
+      }
+
+      return res.status(200).json({ success: true, itemsReceived: items.length });
     } catch (err) {
       return res.status(500).json({ success: false, error: err.message, stack: err.stack });
     }
   }
 
+  // ── GET: serve dashboard data ─────────────────────────────
   if (req.method === 'GET') {
     const { action, days = 90 } = req.query;
 
